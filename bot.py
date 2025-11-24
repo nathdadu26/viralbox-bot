@@ -36,7 +36,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TERABOX_API = os.getenv("TERABOX_API", "")
 
 # MongoDB Configuration
-MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://dadunath68_db_user:HTqUtalv44k9OvJk@cluster0.2s7qel5.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0")
+MONGO_URI = os.getenv("MONGO_URI", "")
 DB_NAME = os.getenv("DB_NAME", "terabox_bot")
 
 # Channels
