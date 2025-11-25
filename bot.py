@@ -336,7 +336,7 @@ async def process_single_link(url: str, link_number: int, total_links: int,
     """Process a single link"""
     try:
         await status_msg.edit_text(
-            f"📄 Processing link {link_number}/{total_links}...\n"
+            f"🔄 Processing link {link_number}/{total_links}...\n"
             f"⏳ Fetching Terabox info...",
             parse_mode=ParseMode.HTML
         )
@@ -365,7 +365,7 @@ async def process_single_link(url: str, link_number: int, total_links: int,
         # Add watermark
         watermarked_name = bot_instance.add_watermark_to_filename(original_file_name)
         
-        # Check file size (20MB limit for stability)
+        # Check file size (50MB limit for stability)
         try:
             size_val, size_unit = file_size_str.split()
             size_val = float(size_val)
@@ -386,7 +386,7 @@ async def process_single_link(url: str, link_number: int, total_links: int,
             return False, None, error_msg
 
         await status_msg.edit_text(
-            f"📄 Processing link {link_number}/{total_links}...\n"
+            f"🔄 Processing link {link_number}/{total_links}...\n"
             f"📦 {original_file_name}\n"
             f"⬇️ Downloading...",
             parse_mode=ParseMode.HTML
@@ -420,7 +420,7 @@ async def process_single_link(url: str, link_number: int, total_links: int,
         logger.info(f"✅ Downloaded: {fpath}")
 
         await status_msg.edit_text(
-            f"📄 Processing link {link_number}/{total_links}...\n"
+            f"🔄 Processing link {link_number}/{total_links}...\n"
             f"📦 {original_file_name}\n"
             f"⬆️ Uploading to channel...",
             parse_mode=ParseMode.HTML
@@ -484,7 +484,7 @@ async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE,
         successful_results = []
         failed_links = []
 
-        # Send initial reply (no progress updates)
+        # Send initial reply
         reply_msg = await context.bot.send_message(
             chat_id=chat_id,
             reply_to_message_id=user_message_id,
@@ -492,14 +492,15 @@ async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE,
             parse_mode=ParseMode.HTML
         )
 
-        logger.info(f"🔄 Processing {total_links} links sequentially")
+        logger.info(f"📋 Processing {total_links} links sequentially")
 
-        # Process each link ONE BY ONE (no progress updates)
+        # Process each link ONE BY ONE
         for idx, url in enumerate(urls, 1):
             logger.info(f"▶️ Processing link {idx}/{total_links}")
             
+            # Pass reply_msg as status_msg parameter
             success, result_data, error_msg = await process_single_link(
-                url, idx, total_links, context
+                url, idx, total_links, context, reply_msg
             )
 
             if success and result_data:
@@ -703,7 +704,7 @@ async def start_webhook_server():
     logger.info(f"📢 Telegram Channel: {TELEGRAM_CHANNEL_ID}")
     logger.info(f"📊 Result Channel: {RESULT_CHANNEL_ID}")
     logger.info(f"🏷️ Watermark: {CHANNEL_USERNAME}")
-    logger.info(f"🔄 Global queue system active")
+    logger.info(f"📋 Global queue system active")
 
     # Keep the server running
     await asyncio.Event().wait()
@@ -738,7 +739,7 @@ def main():
             logger.info("🚀 Bot started in polling mode")
             logger.info(f"📢 Telegram Channel: {TELEGRAM_CHANNEL_ID}")
             logger.info(f"📊 Result Channel: {RESULT_CHANNEL_ID}")
-            logger.info(f"🔄 Global queue system active")
+            logger.info(f"📋 Global queue system active")
             
             await app.run_polling()
         
