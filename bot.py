@@ -476,7 +476,7 @@ async def process_single_link(url: str, link_number: int, total_links: int,
         return False, None, error_msg
 
 async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE, 
-                      message_id: int, chat_id: int, user_message_id: int):
+                      message_id: int, chat_id: int, user_message_id: int, user_media_message):
     """Process all links from one user message - ONE BY ONE"""
     reply_msg = None
     try:
@@ -530,28 +530,33 @@ async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE,
             logger.warning(f"⚠️ Task completed with errors: {len(failed_links)} failed")
             return
 
-        # All successful - send to result channel then delete messages
+        # All successful - copy user's media to result channel with report
         if successful_results:
             try:
+                # Build caption with processed files report
                 result_caption = f"📊 <b>Processed Files Report</b>\n\n"
-                result_caption += f"✅ <b>Success: {len(successful_results)}</b>\n\n"
                 
                 for result in successful_results:
                     result_caption += (
                         f"━━━━━━━━━━━━━━━━\n"
-                        f"📁 {result['original_name']}\n"
-                        f"📊 {result['file_size']}\n"
-                        f"🆔 {result['message_id']}\n"
-                        f"🔗 <code>{result['file_id']}</code>\n\n"
+                        f"📁 File: {result['original_name']}\n"
+                        f"📊 Size: {result['file_size']}\n"
+                        f"🆔 Message ID: {result['message_id']}\n"
+                        f"🔗 File ID: <code>{result['file_id']}</code>\n\n"
                     )
                 
-                await context.bot.send_message(
+                # Copy user's media message to result channel with new caption
+                await context.bot.copy_message(
                     chat_id=RESULT_CHANNEL_ID,
-                    text=result_caption,
+                    from_chat_id=chat_id,
+                    message_id=user_message_id,
+                    caption=result_caption,
                     parse_mode=ParseMode.HTML
                 )
+                logger.info(f"✅ Copied media to result channel with report")
+                
             except Exception as e:
-                logger.error(f"Failed to send to result channel: {e}")
+                logger.error(f"Failed to copy to result channel: {e}")
 
         # Delete both messages (original + reply) on success
         try:
@@ -612,7 +617,8 @@ async def handle_media_with_links(update: Update, context: ContextTypes.DEFAULT_
             context=context,
             message_id=m.message_id,
             chat_id=m.chat_id,
-            user_message_id=m.message_id
+            user_message_id=m.message_id,
+            user_media_message=m
         )
 
     except Exception as e:
@@ -623,13 +629,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not m:
         return
     await m.reply_text(
-        f"✅ Bot is running!\n\n"
-        f"📌 Features:\n"
+        f"✅ <b>Bot is Running!</b>\n\n"
+        f"📌 <b>Features:</b>\n"
         f"• One-by-one processing (no overload)\n"
         f"• Global queue system\n"
-        f"• Automatic file renaming\n"
-        f"• MongoDB storage\n\n"
-        f"Send media with Terabox links in caption.",
+        f"• Automatic file renaming with watermark\n"
+        f"• MongoDB storage for duplicate detection\n"
+        f"• Flood wait handling\n\n"
+        f"📋 <b>How to use:</b>\n"
+        f"Send media (photo/video/document) with Terabox links in caption.\n\n"
+        f"💡 <b>Example:</b>\n"
+        f"Send a photo with caption:\n"
+        f"<code>https://terabox.com/s/xxxxx</code>",
         parse_mode=ParseMode.HTML
     )
 
