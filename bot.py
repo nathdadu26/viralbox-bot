@@ -47,8 +47,8 @@ RESULT_CHANNEL_ID = int(os.getenv("RESULT_CHANNEL_ID", ""))
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@hive_zone")
 
 # Webhook Configuration for Koyeb
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # Your Koyeb app URL
-PORT = int(os.getenv("PORT", "8000"))  # Koyeb automatically sets PORT
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+PORT = int(os.getenv("PORT", "8000"))
 
 # Aria2 Configuration
 ARIA2_RPC_URL = os.getenv("ARIA2_RPC_URL", "http://localhost:6800/jsonrpc")
@@ -164,13 +164,57 @@ class Aria2Client:
                 return {"success": False, "error": info.get("errorMessage", "Download failed")}
             await asyncio.sleep(2)
 
+# ---------------- Global Task Queue ----------------
+class GlobalTaskQueue:
+    def __init__(self):
+        self.queue = asyncio.Queue()
+        self.processing = False
+        self.worker_task = None
+        
+    async def start_worker(self):
+        """Start the background worker that processes tasks one by one"""
+        if self.worker_task is None or self.worker_task.done():
+            self.worker_task = asyncio.create_task(self._worker())
+            logger.info("🚀 Global task queue worker started")
+    
+    async def _worker(self):
+        """Background worker that processes queue items one by one"""
+        while True:
+            try:
+                # Get next task from queue (wait if empty)
+                task = await self.queue.get()
+                
+                self.processing = True
+                logger.info(f"📋 Queue size: {self.queue.qsize()} | Processing new task")
+                
+                # Process the task
+                await task["func"](**task["kwargs"])
+                
+                # Mark task as done
+                self.queue.task_done()
+                self.processing = False
+                
+                # Small delay between tasks
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"❌ Error in queue worker: {e}")
+                self.processing = False
+    
+    async def add_task(self, func, **kwargs):
+        """Add a task to the queue"""
+        await self.queue.put({"func": func, "kwargs": kwargs})
+        logger.info(f"➕ Task added to queue. Queue size: {self.queue.qsize()}")
+
+# Global queue instance
+global_queue = GlobalTaskQueue()
+
 # ---------------- Bot Logic ----------------
 class TeraboxTelegramBot:
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
         self.aria2 = Aria2Client(ARIA2_RPC_URL, ARIA2_SECRET)
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-        self.upload_semaphore = asyncio.Semaphore(1)  # Only 1 upload at a time
 
     async def init_session(self):
         if not self.session:
@@ -189,232 +233,201 @@ class TeraboxTelegramBot:
         return f"Telegram - {CHANNEL_USERNAME} {name}{ext}"
 
     async def download_from_terabox(self, url: str, max_retries: int = 3):
-        """Download from Terabox with retry logic and proper timeout handling"""
+        """Download from Terabox with retry logic"""
         await self.init_session()
         
         for attempt in range(max_retries):
             try:
-                logger.info(f"Terabox API call attempt {attempt + 1}/{max_retries} for URL: {url}")
+                logger.info(f"Terabox API call attempt {attempt + 1}/{max_retries}")
                 async with self.session.get(TERABOX_API, params={"url": url}) as r:
                     data = await r.json()
                     
-                    # Log full API response
-                    logger.info(f"=== TERABOX API RESPONSE (Attempt {attempt + 1}) ===")
-                    logger.info(f"Status Code: {r.status}")
-                    logger.info(f"Full Response: {data}")
-                    logger.info("=" * 50)
-                    
                     if data.get("status") == "✅ Successfully":
-                        logger.info(f"✅ Terabox API success for URL: {url}")
-                        logger.info(f"File Name: {data.get('file_name', 'N/A')}")
-                        logger.info(f"File Size: {data.get('file_size', 'N/A')}")
+                        logger.info(f"✅ Terabox API success")
                         return {"success": True, "data": data}
                     else:
-                        logger.warning(f"⚠️ Terabox API returned unsuccessful status")
+                        logger.warning(f"⚠️ Terabox API unsuccessful")
                         return {"success": False, "error": data.get("status", "Unknown error")}
             except asyncio.TimeoutError:
-                logger.warning(f"⏱️ Timeout on attempt {attempt + 1}/{max_retries}")
+                logger.warning(f"⏱️ Timeout on attempt {attempt + 1}")
                 if attempt == max_retries - 1:
-                    return {"success": False, "error": "API timeout after multiple retries"}
+                    return {"success": False, "error": "API timeout"}
                 await asyncio.sleep(2)
             except Exception as e:
-                logger.error(f"❌ Error on attempt {attempt + 1}/{max_retries}: {str(e)}")
+                logger.error(f"❌ Error on attempt {attempt + 1}: {str(e)}")
                 if attempt == max_retries - 1:
                     return {"success": False, "error": str(e)}
                 await asyncio.sleep(2)
         
-        return {"success": False, "error": "Unknown error after retries"}
+        return {"success": False, "error": "Unknown error"}
 
     async def upload_to_telegram_with_retry(self, context: ContextTypes.DEFAULT_TYPE, file_path: str, 
                                            caption: str, mime_type: str, max_retries: int = 5):
-        """Upload to Telegram with flood wait and error handling"""
+        """Upload to Telegram with flood wait handling"""
         for attempt in range(max_retries):
             try:
-                async with self.upload_semaphore:  # Ensure sequential upload
-                    with open(file_path, "rb") as f:
-                        if mime_type and mime_type.startswith("video"):
-                            msg = await context.bot.send_video(
-                                chat_id=TELEGRAM_CHANNEL_ID, 
-                                video=f, 
-                                caption=caption,
-                                read_timeout=300,
-                                write_timeout=300,
-                                connect_timeout=60
-                            )
-                        elif mime_type and mime_type.startswith("image"):
-                            msg = await context.bot.send_photo(
-                                chat_id=TELEGRAM_CHANNEL_ID, 
-                                photo=f, 
-                                caption=caption,
-                                read_timeout=300,
-                                write_timeout=300,
-                                connect_timeout=60
-                            )
-                        else:
-                            msg = await context.bot.send_document(
-                                chat_id=TELEGRAM_CHANNEL_ID, 
-                                document=f, 
-                                caption=caption,
-                                read_timeout=300,
-                                write_timeout=300,
-                                connect_timeout=60
-                            )
-                    
-                    # Extract file_id based on message type
-                    file_id = None
-                    if msg.video:
-                        file_id = msg.video.file_id
-                    elif msg.photo:
-                        file_id = msg.photo[-1].file_id
-                    elif msg.document:
-                        file_id = msg.document.file_id
-                    
-                    return {"success": True, "message_id": msg.message_id, "file_id": file_id}
+                with open(file_path, "rb") as f:
+                    if mime_type and mime_type.startswith("video"):
+                        msg = await context.bot.send_video(
+                            chat_id=TELEGRAM_CHANNEL_ID, 
+                            video=f, 
+                            caption=caption,
+                            read_timeout=300,
+                            write_timeout=300,
+                            connect_timeout=60
+                        )
+                    elif mime_type and mime_type.startswith("image"):
+                        msg = await context.bot.send_photo(
+                            chat_id=TELEGRAM_CHANNEL_ID, 
+                            photo=f, 
+                            caption=caption,
+                            read_timeout=300,
+                            write_timeout=300,
+                            connect_timeout=60
+                        )
+                    else:
+                        msg = await context.bot.send_document(
+                            chat_id=TELEGRAM_CHANNEL_ID, 
+                            document=f, 
+                            caption=caption,
+                            read_timeout=300,
+                            write_timeout=300,
+                            connect_timeout=60
+                        )
+                
+                # Extract file_id
+                file_id = None
+                if msg.video:
+                    file_id = msg.video.file_id
+                elif msg.photo:
+                    file_id = msg.photo[-1].file_id
+                elif msg.document:
+                    file_id = msg.document.file_id
+                
+                return {"success": True, "message_id": msg.message_id, "file_id": file_id}
                     
             except RetryAfter as e:
                 wait_time = e.retry_after + 2
-                logger.warning(f"⏳ FloodWait: Waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+                logger.warning(f"⏳ FloodWait: Waiting {wait_time}s")
                 await asyncio.sleep(wait_time)
             except TimedOut as e:
-                logger.warning(f"⏱️ Timeout on upload attempt {attempt + 1}/{max_retries}")
+                logger.warning(f"⏱️ Timeout on upload attempt {attempt + 1}")
                 if attempt == max_retries - 1:
                     return {"success": False, "error": f"Upload timeout: {str(e)}"}
                 await asyncio.sleep(5)
             except NetworkError as e:
-                logger.warning(f"🌐 Network error on attempt {attempt + 1}/{max_retries}: {str(e)}")
+                logger.warning(f"🌐 Network error: {str(e)}")
                 if attempt == max_retries - 1:
                     return {"success": False, "error": f"Network error: {str(e)}"}
                 await asyncio.sleep(5)
             except Exception as e:
-                logger.error(f"❌ Upload error on attempt {attempt + 1}/{max_retries}: {str(e)}")
+                logger.error(f"❌ Upload error: {str(e)}")
                 if attempt == max_retries - 1:
                     return {"success": False, "error": str(e)}
                 await asyncio.sleep(5)
         
-        return {"success": False, "error": "Upload failed after all retries"}
+        return {"success": False, "error": "Upload failed"}
 
-# ---------------- Handlers ----------------
+# ---------------- Task Processing Functions ----------------
 bot_instance = TeraboxTelegramBot()
-
-async def schedule_delete(msg, user_msg, delay=1200):
-    await asyncio.sleep(delay)
-    try:
-        await msg.delete()
-    except:
-        pass
-    try:
-        await user_msg.delete()
-    except:
-        pass
 
 async def process_single_link(url: str, link_number: int, total_links: int, 
                               context: ContextTypes.DEFAULT_TYPE, status_msg) -> Tuple[bool, Optional[Dict], Optional[str]]:
-    """
-    Process a single link in the pipeline
-    Returns: (success, result_data, error_message)
-    """
+    """Process a single link"""
     try:
-        # Update status
         await status_msg.edit_text(
             f"📄 Processing link {link_number}/{total_links}...\n"
-            f"⏳ Waiting for Terabox API response...",
+            f"⏳ Fetching Terabox info...",
             parse_mode=ParseMode.HTML
         )
         
-        # Step 1: Download from Terabox
-        logger.info(f"[Link {link_number}/{total_links}] Starting Terabox download for: {url}")
+        # Step 1: Get Terabox info
+        logger.info(f"[{link_number}/{total_links}] Getting Terabox info")
         tb = await bot_instance.download_from_terabox(url)
         
         if not tb["success"]:
-            error_msg = f"❌ Link {link_number}/{total_links}: Terabox API failed\n{tb['error']}"
+            error_msg = f"❌ Terabox API failed: {tb['error']}"
             logger.error(error_msg)
             return False, None, error_msg
 
         data = tb["data"]
         original_file_name = data.get("file_name", "unknown")
+        file_size_str = data.get("file_size", "0")
         
-        logger.info(f"[Link {link_number}/{total_links}] Got response for file: {original_file_name}")
+        logger.info(f"[{link_number}/{total_links}] File: {original_file_name}")
 
         # Check if already processed
         if await is_file_processed(original_file_name):
-            error_msg = f"⚠️ Link {link_number}/{total_links}: File <b>{original_file_name}</b> already processed"
+            error_msg = f"⚠️ Already processed: {original_file_name}"
             logger.info(error_msg)
             return False, None, error_msg
 
-        # Add watermark to filename
+        # Add watermark
         watermarked_name = bot_instance.add_watermark_to_filename(original_file_name)
-        logger.info(f"📝 Renamed: {original_file_name} → {watermarked_name}")
+        
+        # Check file size (20MB limit for stability)
+        try:
+            size_val, size_unit = file_size_str.split()
+            size_val = float(size_val)
+            if size_unit.lower().startswith("kb"):
+                size_mb = size_val / 1024
+            elif size_unit.lower().startswith("mb"):
+                size_mb = size_val
+            elif size_unit.lower().startswith("gb"):
+                size_mb = size_val * 1024
+            else:
+                size_mb = 0
+        except:
+            size_mb = 0
 
-        # Update status
+        if size_mb > 50:
+            error_msg = f"❌ File too large: {file_size_str} (max 50MB)"
+            logger.info(error_msg)
+            return False, None, error_msg
+
         await status_msg.edit_text(
             f"📄 Processing link {link_number}/{total_links}...\n"
-            f"📦 File: {original_file_name}\n"
-            f"⏳ Checking file size...",
+            f"📦 {original_file_name}\n"
+            f"⬇️ Downloading...",
             parse_mode=ParseMode.HTML
         )
 
-        # Get file size
-        file_size_str = data.get("file_size", "0")
-
-        # Update status
-        await status_msg.edit_text(
-            f"📄 Processing link {link_number}/{total_links}...\n"
-            f"📦 File: {original_file_name}\n"
-            f"📊 Size: {file_size_str}\n"
-            f"⬇️ Starting download...",
-            parse_mode=ParseMode.HTML
-        )
-
-        # Step 2: Download file with Aria2
+        # Step 2: Download
         dl_url = data.get("streaming_url") or data.get("download_link")
         if not dl_url:
-            error_msg = f"❌ Link {link_number}/{total_links}: No download link for <b>{original_file_name}</b>"
+            error_msg = f"❌ No download link"
             logger.error(error_msg)
             return False, None, error_msg
 
-        logger.info(f"📥 Starting Aria2 download")
-        
+        logger.info(f"📥 Starting download")
         dl = await bot_instance.aria2.add_download(dl_url, {"out": watermarked_name})
         
         if not dl["success"]:
-            error_msg = f"❌ Link {link_number}/{total_links}: Download failed\n{dl['error']}"
+            error_msg = f"❌ Download failed: {dl['error']}"
             logger.error(error_msg)
             return False, None, error_msg
 
         gid = dl["result"]
-        logger.info(f"✅ Aria2 download started with GID: {gid}")
-        
-        # Update status
-        await status_msg.edit_text(
-            f"📄 Processing link {link_number}/{total_links}...\n"
-            f"📦 File: {original_file_name}\n"
-            f"⬇️ Downloading...",
-            parse_mode=ParseMode.HTML
-        )
+        logger.info(f"✅ Download started: {gid}")
         
         done = await bot_instance.aria2.wait_for_download(gid)
         if not done["success"]:
-            error_msg = f"❌ Link {link_number}/{total_links}: Download error\n{done['error']}"
+            error_msg = f"❌ Download error: {done['error']}"
             logger.error(error_msg)
             return False, None, error_msg
 
         fpath = done["files"][0]["path"]
-        logger.info(f"✅ File downloaded: {fpath}")
+        logger.info(f"✅ Downloaded: {fpath}")
 
-        # Update status
         await status_msg.edit_text(
             f"📄 Processing link {link_number}/{total_links}...\n"
-            f"📦 File: {original_file_name}\n"
-            f"⬆️ Uploading to Telegram channel...",
+            f"📦 {original_file_name}\n"
+            f"⬆️ Uploading to channel...",
             parse_mode=ParseMode.HTML
         )
 
-        # Step 3: Upload to Telegram Channel (Sequential)
-        caption_file = (
-            f"📁 File Name: {watermarked_name}\n"
-            f"📊 File Size: {file_size_str}"
-        )
-        
+        # Step 3: Upload to Telegram
+        caption_file = f"📁 File Name: {watermarked_name}\n📊 File Size: {file_size_str}"
         mime_type, _ = mimetypes.guess_type(fpath)
         
         upload_result = await bot_instance.upload_to_telegram_with_retry(
@@ -422,7 +435,7 @@ async def process_single_link(url: str, link_number: int, total_links: int,
         )
         
         if not upload_result["success"]:
-            error_msg = f"❌ Link {link_number}/{total_links}: Upload failed\n{upload_result['error']}"
+            error_msg = f"❌ Upload failed: {upload_result['error']}"
             logger.error(error_msg)
             try:
                 os.remove(fpath)
@@ -433,12 +446,12 @@ async def process_single_link(url: str, link_number: int, total_links: int,
         message_id = upload_result["message_id"]
         file_id = upload_result["file_id"]
         
-        logger.info(f"✅ Uploaded to channel - Message ID: {message_id}, File ID: {file_id}")
+        logger.info(f"✅ Uploaded - Msg ID: {message_id}")
 
-        # Step 4: Save to Database
+        # Step 4: Save to DB
         await save_file_info(original_file_name, file_size_str, message_id, file_id)
 
-        # Prepare result data
+        # Result data
         result_data = {
             "original_name": original_file_name,
             "watermarked_name": watermarked_name,
@@ -450,115 +463,124 @@ async def process_single_link(url: str, link_number: int, total_links: int,
         # Cleanup
         try:
             os.remove(fpath)
-            logger.info(f"🗑️ Deleted temp file: {fpath}")
+            logger.info(f"🗑️ Deleted: {fpath}")
         except Exception as e:
-            logger.warning(f"Failed to delete temp file: {e}")
+            logger.warning(f"Failed to delete: {e}")
 
-        logger.info(f"[Link {link_number}/{total_links}] Successfully processed: {original_file_name}")
+        logger.info(f"[{link_number}/{total_links}] ✅ Success: {original_file_name}")
         return True, result_data, None
 
     except Exception as e:
-        error_msg = f"❌ Link {link_number}/{total_links}: Unexpected error\n{str(e)}"
-        logger.error(f"Unexpected error processing link {link_number}: {str(e)}")
+        error_msg = f"❌ Unexpected error: {str(e)}"
+        logger.error(f"Error: {str(e)}")
         return False, None, error_msg
 
-async def process_links_pipeline(urls: List[str], context: ContextTypes.DEFAULT_TYPE, update: Update):
-    """
-    Process multiple links in a pipeline - one after another
-    """
-    m = update.effective_message
-    if not m:
-        return
+async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE, 
+                      message_id: int, chat_id: int, user_message_id: int):
+    """Process all links from one user message - ONE BY ONE"""
+    reply_msg = None
+    try:
+        total_links = len(urls)
+        successful_results = []
+        failed_links = []
 
-    total_links = len(urls)
-    successful_results = []
-    failed_links = []
-
-    # Create initial status message
-    status_msg = await m.reply_text(
-        f"📄 Starting pipeline processing...\n"
-        f"📊 Total links: {total_links}",
-        parse_mode=ParseMode.HTML
-    )
-
-    # Process each link sequentially
-    for idx, url in enumerate(urls, 1):
-        logger.info(f"Pipeline: Processing link {idx}/{total_links}")
-        
-        success, result_data, error_msg = await process_single_link(
-            url, idx, total_links, context, status_msg
+        # Send initial reply (no progress updates)
+        reply_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            reply_to_message_id=user_message_id,
+            text=f"⏳ Processing {total_links} link(s)...",
+            parse_mode=ParseMode.HTML
         )
 
-        if success and result_data:
-            successful_results.append(result_data)
-        elif error_msg:
-            failed_links.append(error_msg)
-        
-        # Small delay between links
-        if idx < total_links:
-            await asyncio.sleep(2)
+        logger.info(f"🔄 Processing {total_links} links sequentially")
 
-    # Final summary for status message
-    summary = "📦 <b>Processing Complete!</b>\n\n"
-    
-    if successful_results:
-        summary += f"✅ <b>Successful ({len(successful_results)}):</b>\n\n"
-        for result in successful_results:
-            summary += (
-                f"📁 {result['watermarked_name']}\n"
-                f"📊 Size: {result['file_size']}\n"
-                f"🆔 Message ID: {result['message_id']}\n"
-                f"🔗 File ID: <code>{result['file_id']}</code>\n\n"
-            )
-    
-    if failed_links:
-        summary += f"❌ <b>Failed ({len(failed_links)}):</b>\n\n"
-        summary += "\n\n".join(failed_links)
-
-    # Send results to result channel
-    if successful_results:
-        try:
-            result_caption = f"📊 <b>Processed Files Report</b>\n\n"
-            result_caption += f"✅ <b>Successfully Processed: {len(successful_results)}</b>\n\n"
+        # Process each link ONE BY ONE (no progress updates)
+        for idx, url in enumerate(urls, 1):
+            logger.info(f"▶️ Processing link {idx}/{total_links}")
             
-            for result in successful_results:
-                result_caption += (
-                    f"━━━━━━━━━━━━━━━━\n"
-                    f"📁 <b>File:</b> {result['original_name']}\n"
-                    f"📊 <b>Size:</b> {result['file_size']}\n"
-                    f"🆔 <b>Message ID:</b> {result['message_id']}\n"
-                    f"🔗 <b>File ID:</b> <code>{result['file_id']}</code>\n\n"
+            success, result_data, error_msg = await process_single_link(
+                url, idx, total_links, context
+            )
+
+            if success and result_data:
+                successful_results.append(result_data)
+            elif error_msg:
+                failed_links.append(f"Link {idx}: {error_msg}")
+            
+            # Small delay between links
+            if idx < total_links:
+                await asyncio.sleep(2)
+
+        # Check if there were any errors
+        if failed_links:
+            # Error occurred - show error and keep messages
+            error_summary = "❌ <b>Processing Failed</b>\n\n"
+            error_summary += "\n".join(failed_links)
+            
+            if successful_results:
+                error_summary += f"\n\n✅ Successfully processed: {len(successful_results)}"
+            
+            # Update reply with error (don't delete)
+            try:
+                await reply_msg.edit_text(error_summary, parse_mode=ParseMode.HTML)
+            except:
+                pass
+            
+            logger.warning(f"⚠️ Task completed with errors: {len(failed_links)} failed")
+            return
+
+        # All successful - send to result channel then delete messages
+        if successful_results:
+            try:
+                result_caption = f"📊 <b>Processed Files Report</b>\n\n"
+                result_caption += f"✅ <b>Success: {len(successful_results)}</b>\n\n"
+                
+                for result in successful_results:
+                    result_caption += (
+                        f"━━━━━━━━━━━━━━━━\n"
+                        f"📁 {result['original_name']}\n"
+                        f"📊 {result['file_size']}\n"
+                        f"🆔 {result['message_id']}\n"
+                        f"🔗 <code>{result['file_id']}</code>\n\n"
+                    )
+                
+                await context.bot.send_message(
+                    chat_id=RESULT_CHANNEL_ID,
+                    text=result_caption,
+                    parse_mode=ParseMode.HTML
                 )
-            
-            if failed_links:
-                result_caption += f"\n❌ <b>Failed: {len(failed_links)}</b>"
-            
-            await context.bot.copy_message(
-                chat_id=RESULT_CHANNEL_ID,
-                from_chat_id=m.chat.id,
-                message_id=m.message_id,
-                caption=result_caption,
-                parse_mode=ParseMode.HTML
-            )
+            except Exception as e:
+                logger.error(f"Failed to send to result channel: {e}")
+
+        # Delete both messages (original + reply) on success
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=user_message_id)
+            logger.info(f"🗑️ Deleted user message")
         except Exception as e:
-            logger.error(f"Failed to send to result channel: {e}")
+            logger.warning(f"Failed to delete user message: {e}")
+        
+        try:
+            await reply_msg.delete()
+            logger.info(f"🗑️ Deleted reply message")
+        except Exception as e:
+            logger.warning(f"Failed to delete reply message: {e}")
 
-    # Update status message with final summary
-    try:
-        await status_msg.edit_text(summary, parse_mode=ParseMode.HTML)
-    except:
-        pass
+        logger.info(f"✅ Task completed successfully: {len(successful_results)} files processed")
 
-    # Delete user message
-    try:
-        await m.delete()
-    except:
-        pass
-
-    # Schedule deletion of status message
-    asyncio.create_task(schedule_delete(status_msg, None, delay=1200))
+    except Exception as e:
+        logger.error(f"❌ Error in process_task: {e}")
+        # On unexpected error, show error and keep messages
+        if reply_msg:
+            try:
+                await reply_msg.edit_text(
+                    f"❌ <b>Unexpected Error</b>\n\n{str(e)}",
+                    parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
 
 async def handle_media_with_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming media with links - ADD TO QUEUE"""
     m = update.effective_message
     if not m:
         return
@@ -569,32 +591,31 @@ async def handle_media_with_links(update: Update, context: ContextTypes.DEFAULT_
         urls = list(dict.fromkeys(urls))  # Remove duplicates
 
         if not urls:
-            err_msg = await m.reply_text("❌ No links found in caption.", parse_mode=ParseMode.HTML)
-            asyncio.create_task(schedule_delete(err_msg, m))
             return
 
         terabox_links = [u for u in urls if bot_instance.is_terabox_url(u)]
 
         if not terabox_links:
             err_msg = await m.reply_text(
-                "❌ Not supported domain. Please send valid Terabox links.",
+                "❌ No Terabox links found.",
                 parse_mode=ParseMode.HTML
             )
-            asyncio.create_task(schedule_delete(err_msg, m))
             return
 
-        logger.info(f"Starting pipeline for {len(terabox_links)} Terabox links")
+        logger.info(f"📨 Received {len(terabox_links)} Terabox links from user")
         
-        # Process all links in pipeline
-        await process_links_pipeline(terabox_links, context, update)
+        # Add to queue (will be processed one by one by global worker)
+        await global_queue.add_task(
+            process_task,
+            urls=terabox_links,
+            context=context,
+            message_id=m.message_id,
+            chat_id=m.chat_id,
+            user_message_id=m.message_id
+        )
 
     except Exception as e:
         logger.error(f"Error in handle_media_with_links: {e}")
-        try:
-            err_msg = await m.reply_text(f"❌ Error: {str(e)}", parse_mode=ParseMode.HTML)
-            asyncio.create_task(schedule_delete(err_msg, m))
-        except:
-            pass
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     m = update.effective_message
@@ -603,10 +624,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await m.reply_text(
         f"✅ Bot is running!\n\n"
         f"📌 Features:\n"
-        f"• Downloads from Terabox\n"
-        f"• Renames files with {CHANNEL_USERNAME}\n"
-        f"• Uploads to Telegram channel\n"
-        f"• Stores file info in MongoDB\n\n"
+        f"• One-by-one processing (no overload)\n"
+        f"• Global queue system\n"
+        f"• Automatic file renaming\n"
+        f"• MongoDB storage\n\n"
         f"Send media with Terabox links in caption.",
         parse_mode=ParseMode.HTML
     )
@@ -644,18 +665,18 @@ async def start_webhook_server():
         .build()
     )
 
-    async def handle_media_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.application.create_task(handle_media_with_links(update, context))
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(
         filters.PHOTO | filters.VIDEO | filters.Document.ALL,
-        handle_media_wrapper
+        handle_media_with_links
     ))
 
     # Initialize the application
     await application.initialize()
     await application.start()
+    
+    # Start global queue worker
+    await global_queue.start_worker()
 
     # Set webhook
     if WEBHOOK_URL:
@@ -678,10 +699,11 @@ async def start_webhook_server():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-    logger.info(f"Bot started in webhook mode on port {PORT}")
-    logger.info(f"Telegram Channel ID: {TELEGRAM_CHANNEL_ID}")
-    logger.info(f"Result Channel ID: {RESULT_CHANNEL_ID}")
-    logger.info(f"Channel Username: {CHANNEL_USERNAME}")
+    logger.info(f"🚀 Bot started in webhook mode on port {PORT}")
+    logger.info(f"📢 Telegram Channel: {TELEGRAM_CHANNEL_ID}")
+    logger.info(f"📊 Result Channel: {RESULT_CHANNEL_ID}")
+    logger.info(f"🏷️ Watermark: {CHANNEL_USERNAME}")
+    logger.info(f"🔄 Global queue system active")
 
     # Keep the server running
     await asyncio.Event().wait()
@@ -704,19 +726,19 @@ def main():
                 .build()
             )
 
-            async def handle_media_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-                context.application.create_task(handle_media_with_links(update, context))
-
             app.add_handler(CommandHandler("start", start))
             app.add_handler(MessageHandler(
                 filters.PHOTO | filters.VIDEO | filters.Document.ALL,
-                handle_media_wrapper
+                handle_media_with_links
             ))
+            
+            # Start global queue worker
+            await global_queue.start_worker()
 
-            logger.info("Bot started in polling mode")
-            logger.info(f"Telegram Channel ID: {TELEGRAM_CHANNEL_ID}")
-            logger.info(f"Result Channel ID: {RESULT_CHANNEL_ID}")
-            logger.info(f"Channel Username: {CHANNEL_USERNAME}")
+            logger.info("🚀 Bot started in polling mode")
+            logger.info(f"📢 Telegram Channel: {TELEGRAM_CHANNEL_ID}")
+            logger.info(f"📊 Result Channel: {RESULT_CHANNEL_ID}")
+            logger.info(f"🔄 Global queue system active")
             
             await app.run_polling()
         
