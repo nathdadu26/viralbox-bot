@@ -37,11 +37,14 @@ TERABOX_API = os.getenv("TERABOX_API", "")
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("MONGO_URI", "")
-DB_NAME = os.getenv("DB_NAME", "terabox_bot")
+DB_NAME = os.getenv("DB_NAME", "viralbox_db")
 
 # Channels
 TELEGRAM_CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", ""))
 RESULT_CHANNEL_ID = int(os.getenv("RESULT_CHANNEL_ID", ""))
+
+# Worker URL Base
+WORKER_URL_BASE = os.getenv("WORKER_URL_BASE", "https://file.hivezone69.workers.dev")
 
 # Channel Username for Watermark
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@hive_zone")
@@ -73,18 +76,22 @@ if not BOT_TOKEN:
 mongo_client = None
 db = None
 files_collection = None
+mappings_collection = None
 
 async def init_db():
-    global mongo_client, db, files_collection
+    global mongo_client, db, files_collection, mappings_collection
     try:
         mongo_client = AsyncIOMotorClient(MONGO_URI)
         db = mongo_client[DB_NAME]
-        files_collection = db["files"]
+        files_collection = db["terabox_file_name"]
+        mappings_collection = db["mappings"]
         
         # Create indexes for better performance
         await files_collection.create_index("file_name", unique=True)
-        await files_collection.create_index("message_id")
-        await files_collection.create_index("created_at")
+        
+        # Create index for mappings
+        await mappings_collection.create_index("mapping", unique=True)
+        await mappings_collection.create_index("message_id")
         
         logger.info("✅ MongoDB connected successfully")
     except Exception as e:
@@ -99,19 +106,45 @@ async def is_file_processed(file_name: str) -> bool:
         logger.error(f"Error checking file in DB: {e}")
         return False
 
-async def save_file_info(file_name: str, file_size: str, message_id: int, file_id: str):
+async def save_file_info(file_name: str, file_size: str):
     try:
         document = {
             "file_name": file_name,
-            "file_size": file_size,
-            "message_id": message_id,
-            "file_id": file_id,
-            "created_at": datetime.utcnow()
+            "file_size": file_size
         }
         await files_collection.insert_one(document)
         logger.info(f"✅ Saved to DB: {file_name}")
     except Exception as e:
         logger.warning(f"Failed to save to DB (might be duplicate): {e}")
+
+import random
+import string
+
+def generate_random_mapping(length: int = 6) -> str:
+    """Generate random alphanumeric mapping string"""
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choice(chars) for _ in range(length))
+
+async def save_mapping(message_id: int) -> str:
+    """Save message_id with random mapping and return the mapping"""
+    max_attempts = 10
+    for attempt in range(max_attempts):
+        try:
+            mapping = generate_random_mapping()
+            document = {
+                "mapping": mapping,
+                "message_id": message_id
+            }
+            await mappings_collection.insert_one(document)
+            logger.info(f"✅ Saved mapping: {mapping} -> {message_id}")
+            return mapping
+        except Exception as e:
+            if attempt == max_attempts - 1:
+                logger.error(f"Failed to save mapping after {max_attempts} attempts: {e}")
+                raise
+            # Duplicate mapping, try again
+            continue
+    raise Exception("Failed to generate unique mapping")
 
 # ---------------- Aria2Client ----------------
 class Aria2Client:
@@ -448,8 +481,8 @@ async def process_single_link(url: str, link_number: int, total_links: int,
         
         logger.info(f"✅ Uploaded - Msg ID: {message_id}")
 
-        # Step 4: Save to DB
-        await save_file_info(original_file_name, file_size_str, message_id, file_id)
+        # Step 4: Save to DB (only file_name and file_size)
+        await save_file_info(original_file_name, file_size_str)
 
         # Result data
         result_data = {
@@ -457,7 +490,8 @@ async def process_single_link(url: str, link_number: int, total_links: int,
             "watermarked_name": watermarked_name,
             "file_size": file_size_str,
             "message_id": message_id,
-            "file_id": file_id
+            "file_id": file_id,
+            "mapping": None  # Will be set later
         }
 
         # Cleanup
@@ -530,22 +564,20 @@ async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE,
             logger.warning(f"⚠️ Task completed with errors: {len(failed_links)} failed")
             return
 
-        # All successful - copy user's media to result channel with report
+        # All successful - copy user's media to result channel with worker URL
         if successful_results:
             try:
-                # Build caption with processed files report
-                result_caption = f"📊 <b>Processed Files Report</b>\n\n"
+                # Generate mapping and save to DB for first successful result
+                # (assuming single file per message, but works for multiple too)
+                mapping = await save_mapping(successful_results[0]['message_id'])
                 
-                for result in successful_results:
-                    result_caption += (
-                        f"━━━━━━━━━━━━━━━━\n"
-                        f"📁 File: {result['original_name']}\n"
-                        f"📊 Size: {result['file_size']}\n"
-                        f"🆔 Message ID: {result['message_id']}\n"
-                        f"🔗 File ID: <code>{result['file_id']}</code>\n\n"
-                    )
+                # Build worker URL
+                worker_url = f"{WORKER_URL_BASE}/{mapping}"
                 
-                # Copy user's media message to result channel with new caption
+                # Simple caption with just the worker URL
+                result_caption = f"🔗 {worker_url}"
+                
+                # Copy user's media message to result channel with worker URL
                 await context.bot.copy_message(
                     chat_id=RESULT_CHANNEL_ID,
                     from_chat_id=chat_id,
@@ -553,7 +585,7 @@ async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE,
                     caption=result_caption,
                     parse_mode=ParseMode.HTML
                 )
-                logger.info(f"✅ Copied media to result channel with report")
+                logger.info(f"✅ Copied media to result channel with worker URL: {worker_url}")
                 
             except Exception as e:
                 logger.error(f"Failed to copy to result channel: {e}")
