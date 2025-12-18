@@ -65,8 +65,8 @@ TERABOX_DOMAINS = [
     "teraboxdrive.com", "dubox.com"
 ]
 
-# API timeout
-API_TIMEOUT = int(os.getenv("API_TIMEOUT", "30"))
+# API timeout - increased for slow Terabox API
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "120"))
 
 # Validate required environment variables
 if not BOT_TOKEN:
@@ -251,7 +251,8 @@ class TeraboxTelegramBot:
 
     async def init_session(self):
         if not self.session:
-            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=API_TIMEOUT))
+            # Increased timeout for slow Terabox API
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120))
 
     def is_terabox_url(self, url: str) -> bool:
         try:
@@ -266,31 +267,48 @@ class TeraboxTelegramBot:
         return f"Telegram - {CHANNEL_USERNAME} {name}{ext}"
 
     async def download_from_terabox(self, url: str, max_retries: int = 3):
-        """Download from Terabox with retry logic"""
+        """Download from Terabox with retry logic and proper timeout handling"""
         await self.init_session()
         
         for attempt in range(max_retries):
             try:
                 logger.info(f"Terabox API call attempt {attempt + 1}/{max_retries}")
-                async with self.session.get(TERABOX_API, params={"url": url}) as r:
+                
+                # API ko proper URL format chahiye
+                api_url = f"{TERABOX_API}?url={urllib.parse.quote(url)}"
+                
+                # Increased timeout for slow API - 120 seconds
+                async with self.session.get(api_url, timeout=aiohttp.ClientTimeout(total=120)) as r:
+                    # Check if response is OK
+                    if r.status != 200:
+                        logger.warning(f"⚠️ API returned status {r.status}")
+                        if attempt == max_retries - 1:
+                            return {"success": False, "error": f"API returned status {r.status}"}
+                        await asyncio.sleep(3)
+                        continue
+                    
                     data = await r.json()
                     
+                    # Check for successful response
                     if data.get("status") == "✅ Successfully":
                         logger.info(f"✅ Terabox API success")
                         return {"success": True, "data": data}
                     else:
-                        logger.warning(f"⚠️ Terabox API unsuccessful")
-                        return {"success": False, "error": data.get("status", "Unknown error")}
+                        logger.warning(f"⚠️ Terabox API unsuccessful: {data.get('status', 'Unknown')}")
+                        if attempt == max_retries - 1:
+                            return {"success": False, "error": data.get("status", "Unknown error")}
+                        await asyncio.sleep(3)
+                        
             except asyncio.TimeoutError:
-                logger.warning(f"⏱️ Timeout on attempt {attempt + 1}")
+                logger.warning(f"⏱️ Timeout on attempt {attempt + 1} (API is slow)")
                 if attempt == max_retries - 1:
-                    return {"success": False, "error": "API timeout"}
-                await asyncio.sleep(2)
+                    return {"success": False, "error": "API timeout - try again later"}
+                await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"❌ Error on attempt {attempt + 1}: {str(e)}")
                 if attempt == max_retries - 1:
                     return {"success": False, "error": str(e)}
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
         
         return {"success": False, "error": "Unknown error"}
 
