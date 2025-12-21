@@ -502,6 +502,12 @@ async def process_single_link(url: str, link_number: int, total_links: int,
         # Step 4: Save to DB (only file_name and file_size)
         await save_file_info(original_file_name, file_size_str)
 
+        # Generate mapping and save to DB
+        mapping = await save_mapping(message_id)
+        
+        # Build worker URL
+        worker_url = f"{WORKER_URL_BASE}/{mapping}"
+        
         # Result data
         result_data = {
             "original_name": original_file_name,
@@ -509,7 +515,8 @@ async def process_single_link(url: str, link_number: int, total_links: int,
             "file_size": file_size_str,
             "message_id": message_id,
             "file_id": file_id,
-            "mapping": None  # Will be set later
+            "mapping": mapping,
+            "worker_url": worker_url
         }
 
         # Cleanup
@@ -564,38 +571,18 @@ async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE,
             if idx < total_links:
                 await asyncio.sleep(2)
 
-        # Check if there were any errors
-        if failed_links:
-            # Error occurred - show error and keep messages
-            error_summary = "❌ <b>Processing Failed</b>\n\n"
-            error_summary += "\n".join(failed_links)
-            
-            if successful_results:
-                error_summary += f"\n\n✅ Successfully processed: {len(successful_results)}"
-            
-            # Update reply with error (don't delete)
-            try:
-                await reply_msg.edit_text(error_summary, parse_mode=ParseMode.HTML)
-            except:
-                pass
-            
-            logger.warning(f"⚠️ Task completed with errors: {len(failed_links)} failed")
-            return
-
-        # All successful - copy user's media to result channel with worker URL
+        # Post to result channel if ANY successful results exist
         if successful_results:
             try:
-                # Generate mapping and save to DB for first successful result
-                # (assuming single file per message, but works for multiple too)
-                mapping = await save_mapping(successful_results[0]['message_id'])
+                # Build caption with all successful worker URLs
+                result_caption = ""
+                for result in successful_results:
+                    result_caption += f"✅ {result['worker_url']}\n"
                 
-                # Build worker URL
-                worker_url = f"{WORKER_URL_BASE}/{mapping}"
+                # Remove trailing newline
+                result_caption = result_caption.strip()
                 
-                # Simple caption with just the worker URL
-                result_caption = f"🔗 {worker_url}"
-                
-                # Copy user's media message to result channel with worker URL
+                # Copy user's media message to result channel with worker URLs
                 await context.bot.copy_message(
                     chat_id=RESULT_CHANNEL_ID,
                     from_chat_id=chat_id,
@@ -603,25 +590,72 @@ async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE,
                     caption=result_caption,
                     parse_mode=ParseMode.HTML
                 )
-                logger.info(f"✅ Copied media to result channel with worker URL: {worker_url}")
+                logger.info(f"✅ Posted {len(successful_results)} successful results to result channel")
                 
             except Exception as e:
                 logger.error(f"Failed to copy to result channel: {e}")
 
-        # Delete both messages (original + reply) on success
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=user_message_id)
-            logger.info(f"🗑️ Deleted user message")
-        except Exception as e:
-            logger.warning(f"Failed to delete user message: {e}")
-        
-        try:
-            await reply_msg.delete()
-            logger.info(f"🗑️ Deleted reply message")
-        except Exception as e:
-            logger.warning(f"Failed to delete reply message: {e}")
+        # Update reply message with final status
+        if failed_links and successful_results:
+            # Some succeeded, some failed
+            final_msg = f"⚠️ <b>Partial Success</b>\n\n"
+            final_msg += f"✅ Successful: {len(successful_results)}\n"
+            final_msg += f"❌ Failed: {len(failed_links)}\n\n"
+            final_msg += "<b>Failed Links:</b>\n"
+            final_msg += "\n".join(failed_links[:5])  # Show first 5 errors
+            
+            try:
+                await reply_msg.edit_text(final_msg, parse_mode=ParseMode.HTML)
+            except:
+                pass
+            
+            logger.warning(f"⚠️ Task completed: {len(successful_results)} success, {len(failed_links)} failed")
+            
+            # Delete user's original message
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=user_message_id)
+                logger.info(f"🗑️ Deleted user message")
+            except Exception as e:
+                logger.warning(f"Failed to delete user message: {e}")
+                
+        elif failed_links and not successful_results:
+            # All failed
+            error_summary = "❌ <b>All Links Failed</b>\n\n"
+            error_summary += "\n".join(failed_links)
+            
+            try:
+                await reply_msg.edit_text(error_summary, parse_mode=ParseMode.HTML)
+            except:
+                pass
+            
+            logger.warning(f"❌ Task failed: All {len(failed_links)} links failed")
+            return
+            
+        else:
+            # All succeeded
+            try:
+                await reply_msg.edit_text(
+                    f"✅ <b>All {len(successful_results)} links processed successfully!</b>",
+                    parse_mode=ParseMode.HTML
+                )
+                await asyncio.sleep(2)
+            except:
+                pass
+            
+            # Delete both messages on complete success
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=user_message_id)
+                logger.info(f"🗑️ Deleted user message")
+            except Exception as e:
+                logger.warning(f"Failed to delete user message: {e}")
+            
+            try:
+                await reply_msg.delete()
+                logger.info(f"🗑️ Deleted reply message")
+            except Exception as e:
+                logger.warning(f"Failed to delete reply message: {e}")
 
-        logger.info(f"✅ Task completed successfully: {len(successful_results)} files processed")
+            logger.info(f"✅ Task completed successfully: {len(successful_results)} files processed")
 
     except Exception as e:
         logger.error(f"❌ Error in process_task: {e}")
