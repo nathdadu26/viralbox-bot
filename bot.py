@@ -47,7 +47,7 @@ RESULT_CHANNEL_ID = int(os.getenv("RESULT_CHANNEL_ID", ""))
 WORKER_URL_BASE = os.getenv("WORKER_URL_BASE", "https://file.hivezone69.workers.dev")
 
 # Channel Username for Watermark
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@hive_zone")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@AtoZ_hub")
 
 # Webhook Configuration for Koyeb
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
