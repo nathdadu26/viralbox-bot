@@ -670,9 +670,14 @@ async def process_task(urls: List[str], context: ContextTypes.DEFAULT_TYPE,
                 pass
 
 async def handle_media_with_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming media with links - ADD TO QUEUE"""
+    """Handle incoming media with links - ADD TO QUEUE (Ignore only configured channels)"""
     m = update.effective_message
     if not m:
+        return
+
+    # IGNORE ONLY CONFIGURED CHANNELS (TELEGRAM_CHANNEL_ID and RESULT_CHANNEL_ID)
+    if m.chat.id == TELEGRAM_CHANNEL_ID or m.chat.id == RESULT_CHANNEL_ID:
+        logger.info(f"⏭️ Ignoring post from configured channel: {m.chat.id}")
         return
 
     try:
@@ -719,7 +724,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Global queue system\n"
         f"• Automatic file renaming with watermark\n"
         f"• MongoDB storage for duplicate detection\n"
-        f"• Flood wait handling\n\n"
+        f"• Flood wait handling\n"
+        f"• Ignores configured channels\n\n"
         f"📋 <b>How to use:</b>\n"
         f"Send media (photo/video/document) with Terabox links in caption.\n\n"
         f"💡 <b>Example:</b>\n"
@@ -800,6 +806,7 @@ async def start_webhook_server():
     logger.info(f"📊 Result Channel: {RESULT_CHANNEL_ID}")
     logger.info(f"🏷️ Watermark: {CHANNEL_USERNAME}")
     logger.info(f"📋 Global queue system active")
+    logger.info(f"⏭️ Ignoring channels: {TELEGRAM_CHANNEL_ID}, {RESULT_CHANNEL_ID}")
 
     # Keep the server running
     await asyncio.Event().wait()
@@ -835,6 +842,7 @@ def main():
             logger.info(f"📢 Telegram Channel: {TELEGRAM_CHANNEL_ID}")
             logger.info(f"📊 Result Channel: {RESULT_CHANNEL_ID}")
             logger.info(f"📋 Global queue system active")
+            logger.info(f"⏭️ Ignoring channels: {TELEGRAM_CHANNEL_ID}, {RESULT_CHANNEL_ID}")
             
             await app.run_polling()
         
