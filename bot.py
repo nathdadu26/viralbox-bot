@@ -44,10 +44,10 @@ TELEGRAM_CHANNEL_ID = int(os.getenv("TELEGRAM_CHANNEL_ID", ""))
 RESULT_CHANNEL_ID = int(os.getenv("RESULT_CHANNEL_ID", ""))
 
 # Worker URL Base
-WORKER_URL_BASE = os.getenv("WORKER_URL_BASE", "https://file.hivezone69.workers.dev")
+WORKER_URL_BASE = os.getenv("WORKER_URL_BASE", "")
 
 # Channel Username for Watermark
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@AtoZ_hub")
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@Mid_Night_Hub")
 
 # Webhook Configuration for Koyeb
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
